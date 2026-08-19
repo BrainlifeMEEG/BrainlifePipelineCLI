@@ -90,6 +90,7 @@ class PipelineRunner:
         config,
         tags=None,
         instance_name=None,
+        instance_id=None,
         preferred_resource=None,
         dry_run=False,
     ):
@@ -112,7 +113,9 @@ class PipelineRunner:
             cmd += ["--input", flag]
         for tag in tags or []:
             cmd += ["--tag", tag]
-        if instance_name:
+        if instance_id:
+            cmd += ["--instance-id", instance_id]
+        elif instance_name:
             cmd += ["--instance-name", instance_name]
 
         if dry_run:
@@ -192,6 +195,7 @@ class PipelineRunner:
         config,
         tags=None,
         instance_name=None,
+        instance_id=None,
         preferred_resource=None,
         dry_run=False,
         output_id="out_dir",
@@ -208,7 +212,7 @@ class PipelineRunner:
             print(f"[run] {step_key}: app={app_id} inputs={dataset_ids} config={config}")
             self.app_run(
                 app_id, input_ids, dataset_ids, config,
-                tags=tags, instance_name=instance_name,
+                tags=tags, instance_name=instance_name, instance_id=instance_id,
                 preferred_resource=preferred_resource, dry_run=dry_run,
             )
             return f"DRYRUN:{step_key}"
@@ -222,7 +226,7 @@ class PipelineRunner:
                 )
                 task_id = self.app_run(
                     app_id, input_ids, dataset_ids, config,
-                    tags=tags, instance_name=instance_name,
+                    tags=tags, instance_name=instance_name, instance_id=instance_id,
                     preferred_resource=preferred_resource,
                 )
                 self.app_wait(task_id)
