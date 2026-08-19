@@ -134,6 +134,22 @@ invoke as `python -m brainlife_pipeline_cli.cli ...` for now, or add a
   `input_selection={"events": "ignore"}` explicitly when creating the rule
   — otherwise the rule can sit `active: true` forever without ever
   triggering a single task.
+- **`app_run()` crashes if an output's `datatype_tags_pass` points at an
+  optional input you didn't supply**: fixed in this tool's vendored
+  `bl-app-run-instanced.js` (guards `inputs[id] || []`), but worth knowing
+  this is a real upstream `bl app run` bug too, not something specific to
+  this fork.
+- **An app's output archiving can silently fail (dataset shows `status:
+  "stored"`, `size: 0`, fails to download) with no error surfaced
+  anywhere** — reproduced with `maxwell-filter` on the `s3fs` storage
+  backend when two very different output files (a large raw `.fif` and a
+  small `.tsv`) shared one output directory; splitting them into separate
+  output dirs made the large file archive correctly, but a small
+  `report.html` output kept failing (0 bytes, invalid tar stream on
+  download) even after the split. `get_outputs()` only checks
+  `status == "stored"`, not size or actual downloadability — always spot
+  check with `bl data download` before trusting a "stored" output, and
+  don't assume a "finished" task produced usable output.
 
 ## What's not here
 
