@@ -277,7 +277,11 @@ function runApp(headers, opt) {
                 let tags = [];
                 if(output.datatype_tags_pass) {
                     console.log("input for", output.datatype_tags_pass);
-                    inputs[output.datatype_tags_pass].forEach(dataset=>{
+                    //datatype_tags_pass can reference an optional input that
+                    //wasn't provided on this run (e.g. an opt01 override
+                    //bundle) -- inputs[id] is then undefined, not an empty
+                    //array, so guard instead of crashing.
+                    (inputs[output.datatype_tags_pass] || []).forEach(dataset=>{
                         if(!dataset) return; //could this really happen?
                         if(dataset.datatype_tags) tags = tags.concat(dataset.datatype_tags);
                         Object.assign(output_req.meta, dataset.meta);
