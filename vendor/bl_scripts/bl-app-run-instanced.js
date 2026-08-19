@@ -14,6 +14,7 @@ commander
     .option('--config <json string>', 'config to use for running the app')
     .option('--tag <tag>', 'add a tag to the archived dataset', util.collect, [])
     .option('--instance-name <name>', 'reuse (or create) the instance with this exact name, instead of a random one, so multiple app runs group into a single process')
+    .option('--instance-id <id>', 'submit into this exact existing instance by id, instead of finding/creating one by name (takes precedence over --instance-name)')
     .option('-j, --json', 'output resulting app task in json format')
     .parse(process.argv);
 
@@ -38,6 +39,7 @@ util.loadJwt().then(jwt => {
         tags: commander.tag,
         json: commander.json,
         instanceName: commander.instanceName,
+        instanceId: commander.instanceId,
     }).then(task=>{
         if (commander.json) console.log(JSON.stringify(task, null, 4));
     }).catch(err=>{
@@ -172,11 +174,16 @@ function runApp(headers, opt) {
         });
         if(missing_inputs.length > 0) return reject("some required inputs are missing:"+missing_inputs.map(input=>input.id).toString());
 
-        // create instance (reuse an existing one by exact name if --instance-name was given,
-        // so multiple app runs can be grouped into a single process instead of each getting
-        // its own randomly-named instance)
-        let instanceName = opt.instanceName || ((apps[0].tags||'CLI Process') + "." + (Math.random()));
-        let instance = await util.findOrCreateInstance(headers, instanceName, { project, desc: opt.instanceName || ("(CLI) " + app.name) });
+        // create instance (reuse an existing one by exact id if --instance-id was given, or by
+        // exact name if --instance-name was given, so multiple app runs can be grouped into a
+        // single process instead of each getting its own randomly-named instance)
+        let instance;
+        if (opt.instanceId) {
+            instance = { _id: opt.instanceId };
+        } else {
+            let instanceName = opt.instanceName || ((apps[0].tags||'CLI Process') + "." + (Math.random()));
+            instance = await util.findOrCreateInstance(headers, instanceName, { project, desc: opt.instanceName || ("(CLI) " + app.name) });
+        }
         
         // prepare config to submit the app
         let values = {};
