@@ -295,7 +295,10 @@ function runApp(headers, opt) {
                     });
                 }
                 tags = tags.concat(output.datatype_tags); //add specified output tags at the end
-                output_req.datatype_tags = tags 
+                //a multi input can pass through the same tags from several datasets
+                //(e.g. several runs all tagged eeg/egi/converted) -- dedupe rather than
+                //repeating each dataset's tags once per dataset
+                output_req.datatype_tags = [...new Set(tags)]
                 console.dir(output_req);
 
                 app_outputs.push(output_req);
