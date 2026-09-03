@@ -203,6 +203,7 @@ class PipelineRunner:
         dry_run=False,
         output_id="out_dir",
         direct_deps=False,
+        timeout_s=3600,
     ):
         """Skip-if-already-done, else submit/wait/retry, checkpointing
         `state` to `state_path` after every successful step. `state` is
@@ -218,6 +219,15 @@ class PipelineRunner:
         upload`ed datasets; not true for datasets predating that
         provenance tracking). Does not change how a step's own output gets
         archived -- that step is unavoidable and unaffected either way.
+
+        `timeout_s` (default 3600, matching app_wait's own default): how
+        long to wait for a submitted task before treating it as failed and
+        retrying. Some real, correctly-running apps genuinely exceed 1h
+        (confirmed on the ICM cluster: a full AutoReject CV search on real
+        MEG epochs, and a real ICA fit at n_components=0.999) -- a caller
+        that knows a given app/config is legitimately slow should pass a
+        longer timeout_s rather than let run_step time it out and burn a
+        wasted duplicate retry on cluster compute that was still working.
         """
         if step_key in state and "outputs" in state[step_key]:
             print(f"[skip] {step_key} already done -> {state[step_key]['outputs']}")
@@ -246,7 +256,7 @@ class PipelineRunner:
                     preferred_resource=preferred_resource,
                     direct_deps=direct_deps,
                 )
-                self.app_wait(task_id)
+                self.app_wait(task_id, timeout_s=timeout_s)
                 outputs = self.get_outputs(task_id)
                 if output_id not in outputs:
                     raise RuntimeError(
