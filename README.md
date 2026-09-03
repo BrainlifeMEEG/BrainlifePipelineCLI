@@ -84,6 +84,24 @@ skips (returning the cached output id) if `step_key` is already recorded —
 safe to re-run the whole driver script after any failure. See
 `examples/example_driver.py` for a fuller skeleton.
 
+Pass `direct_deps=True` on `run_step`/`app_run` for a multi-step chain within
+one instance. Without it, **every** app run — even one immediately consuming
+the previous step's own output — makes the CLI create a fresh "Data Staging
+Task" that re-fetches the input from Warehouse archive storage before the
+real app can start, on top of the output-archiving that step's *own* result
+already has to go through. `direct_deps=True` skips that staging round-trip
+and depends directly on each input dataset's producing task instead (via its
+`prov.task`/`prov.subdir` — the same mechanism the platform itself already
+uses internally for e.g. a stage task feeding straight into the next app).
+Confirmed working for both single- and multi-input (`epoch`'s `raw`+`events`,
+sourced from two different prior tasks) apps. Requires every input dataset
+to actually carry `prov.task`/`prov.subdir` — true for both app-task outputs
+and `bl data upload`ed datasets, but not for anything that predates
+provenance tracking. It does **not** skip output archiving — that still has
+to happen for a task's result to become a queryable, reusable dataset at
+all, direct-deps or not, so it doesn't by itself fix an archiving-backend
+stall on a step's own output, just removes one extra task+read per step.
+
 ### CLI (`blpipe`)
 
 ```bash

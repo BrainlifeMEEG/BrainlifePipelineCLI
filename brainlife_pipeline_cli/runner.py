@@ -93,6 +93,7 @@ class PipelineRunner:
         instance_id=None,
         preferred_resource=None,
         dry_run=False,
+        direct_deps=False,
     ):
         cmd = [
             "node",
@@ -117,6 +118,8 @@ class PipelineRunner:
             cmd += ["--instance-id", instance_id]
         elif instance_name:
             cmd += ["--instance-name", instance_name]
+        if direct_deps:
+            cmd += ["--direct-deps"]
 
         if dry_run:
             print(f"[dry-run] {' '.join(cmd)}")
@@ -199,11 +202,23 @@ class PipelineRunner:
         preferred_resource=None,
         dry_run=False,
         output_id="out_dir",
+        direct_deps=False,
     ):
         """Skip-if-already-done, else submit/wait/retry, checkpointing
         `state` to `state_path` after every successful step. `state` is
         mutated in place so callers can keep threading it through a chain
-        of calls."""
+        of calls.
+
+        `direct_deps=True` skips the CLI's usual /dataset/stage round-trip
+        and depends directly on each input dataset's own producing task
+        (via its prov.task/prov.subdir) instead -- avoids a redundant
+        staging task and archive read on every step of a multi-app chain
+        within one instance. Requires every input dataset to carry
+        prov.task/prov.subdir (true for both app-task outputs and `bl data
+        upload`ed datasets; not true for datasets predating that
+        provenance tracking). Does not change how a step's own output gets
+        archived -- that step is unavoidable and unaffected either way.
+        """
         if step_key in state and "outputs" in state[step_key]:
             print(f"[skip] {step_key} already done -> {state[step_key]['outputs']}")
             return state[step_key]["outputs"][output_id]
@@ -214,6 +229,7 @@ class PipelineRunner:
                 app_id, input_ids, dataset_ids, config,
                 tags=tags, instance_name=instance_name, instance_id=instance_id,
                 preferred_resource=preferred_resource, dry_run=dry_run,
+                direct_deps=direct_deps,
             )
             return f"DRYRUN:{step_key}"
 
@@ -228,6 +244,7 @@ class PipelineRunner:
                     app_id, input_ids, dataset_ids, config,
                     tags=tags, instance_name=instance_name, instance_id=instance_id,
                     preferred_resource=preferred_resource,
+                    direct_deps=direct_deps,
                 )
                 self.app_wait(task_id)
                 outputs = self.get_outputs(task_id)
