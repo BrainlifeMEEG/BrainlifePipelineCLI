@@ -15,7 +15,9 @@ commander
     .option('--tag <tag>', 'add a tag to the archived dataset', util.collect, [])
     .option('--instance-name <name>', 'reuse (or create) the instance with this exact name, instead of a random one, so multiple app runs group into a single process')
     .option('--instance-id <id>', 'submit into this exact existing instance by id, instead of finding/creating one by name (takes precedence over --instance-name)')
+    .option('--direct-deps', 'skip the /dataset/stage round-trip and depend directly on each input dataset\'s own producing task (via its prov.task/prov.subdir) instead -- avoids an extra staging task and an extra archive read on every chained step; the input dataset still must be status:stored (same validation as before), just referenced in place rather than re-staged. Commander note: this is a plain boolean flag, NOT the special --no-x negation form')
     .option('-j, --json', 'output resulting app task in json format')
+    .option('--dry-run', 'print the constructed task submission payload and exit, without POSTing anything')
     .parse(process.argv);
 
 try {
@@ -40,6 +42,8 @@ util.loadJwt().then(jwt => {
         json: commander.json,
         instanceName: commander.instanceName,
         instanceId: commander.instanceId,
+        directDeps: commander.directDeps,
+        dryRun: commander.dryRun,
     }).then(task=>{
         if (commander.json) console.log(JSON.stringify(task, null, 4));
     }).catch(err=>{
@@ -154,15 +158,23 @@ function runApp(headers, opt) {
             if (app_input.datatype != dataset.datatype) return reject("Given input of datatype " + datatypeTable[dataset.datatype].name + " but expected " + datatypeTable[app_input.datatype].name + " when checking " + input);
             
             // validate dataset's datatype tags
+            // NOTE: this must be a plain for-loop, not .forEach() -- `return reject(...)`
+            // inside a forEach callback only exits that callback, not runApp's executor,
+            // so a real tag mismatch would settle the promise as rejected (silently, since
+            // -j suppresses non-JSON stdout and the CLI's caller only sees an unparseable
+            // stdout) while execution fell through and still POSTed a real task to Amaretti
+            // -- confirmed on the ICM cluster: repeated silent duplicate task creation on
+            // every retry despite the CLI reporting failure each time. See
+            // project_config_default_vs_missing memory (BrainlifeMEEG-code repo).
             let userInputTags = {};
             dataset.datatype_tags.forEach(tag => userInputTags[tag] = 1);
-            app_input.datatype_tags.forEach(tag => {
+            for (let tag of app_input.datatype_tags) {
                 if (tag.startsWith("!")) {
                     if (userInputTags[tag.substring(1)]) return reject("This app requires that the input data object for " + file_id + " should NOT have datatype tag '" + tag.substring(1) + "' but found it in " + input);
                 } else {
                     if (!userInputTags[tag]) return reject("This app requires that the input data object for " + file_id + " have datatype tag '" + tag + "', but it is not set on " + input);
                 }
-            });
+            }
             
             inputs[file_id] = inputs[file_id] || [];
             inputs[file_id].push(dataset);
@@ -206,19 +218,50 @@ function runApp(headers, opt) {
         });
         dataset_ids = [...new Set(dataset_ids)]; //TODO - api does this now so I don't have to do it.
 
-        //TODO - similar code exists on UI modals/appsubmit.vue
-        request.post({url: config.api.warehouse+'/dataset/stage', json: true, headers,
-            body: {
-                instance_id: instance._id,
-                dataset_ids,
-            }
-        }, (err, res, body)=>{
-            if(err) return reject(err);
-            if(res.statusCode != 200) return reject(res.body.message);
-            let task = body.task;
-            if(!opt.json) console.log("Data Staging Task Created (" + task._id + ")");
+        //--direct-deps: skip /dataset/stage entirely. Every dataset already carries
+        //prov.task._id/prov.subdir pointing at wherever it actually lives (a real app
+        //task's own output dir, or an upload task) -- deps_config can reference that
+        //directly, same as any normal chained step already does internally. This avoids
+        //creating a redundant "Data Staging Task" (and its own archive read) on every
+        //single step of a multi-app chain within one instance.
+        if (opt.directDeps) {
+            let missingProv = dataset_ids.filter(id => {
+                let ds = Object.values(inputs).flat().find(d => d._id == id);
+                return !(ds && ds.prov && ds.prov.task && ds.prov.subdir);
+            });
+            if (missingProv.length > 0) return reject("--direct-deps requires prov.task/prov.subdir on every input dataset, missing for: " + missingProv.join(", "));
+        }
 
-            const subdirs = [];
+        await finishSubmission(opt.directDeps ? null : await stageDatasets(dataset_ids));
+
+        function stageDatasets(dataset_ids) {
+            //TODO - similar code exists on UI modals/appsubmit.vue
+            return new Promise((resolve, reject2) => {
+                request.post({url: config.api.warehouse+'/dataset/stage', json: true, headers,
+                    body: {
+                        instance_id: instance._id,
+                        dataset_ids,
+                    }
+                }, (err, res, body)=>{
+                    if(err) return reject2(err);
+                    if(res.statusCode != 200) return reject2(res.body.message);
+                    let task = body.task;
+                    if(!opt.json) console.log("Data Staging Task Created (" + task._id + ")");
+                    resolve(task);
+                });
+            });
+        }
+
+        async function finishSubmission(stageTask) {
+            //per-dataset {taskId, subdir} to depend on: either the shared staging task
+            //(dataset id used as its subdir name, as before), or -- with --direct-deps --
+            //each dataset's own producing task directly.
+            function taskRef(user_input) {
+                if (stageTask) return { taskId: stageTask._id, subdir: user_input._id };
+                return { taskId: user_input.prov.task._id, subdir: user_input.prov.subdir };
+            }
+
+            const depsByTask = {}; //taskId -> Set(subdirs), collapsed into deps_config below
             let app_inputs = [];
             app.inputs.forEach(input => {
                 //find config.json key mapped to this input
@@ -229,24 +272,35 @@ function runApp(headers, opt) {
                     }
                 }
 
-                //for each input, find dataset info from staged job
                 if(inputs[input.id]) inputs[input.id].forEach(user_input=>{
-                    let dataset = task.config._outputs.find(output=>output.dataset_id == user_input._id);
+                    let ref = taskRef(user_input);
+                    // --direct-deps: no staging task output record to read (datatype,
+                    // meta, datatype_tags, ...) from, so carry the resolved dataset's own
+                    // fields over instead -- same shape the downstream code (meta merge,
+                    // datatype_tags_pass) expects either way.
+                    let dataset = stageTask
+                        ? stageTask.config._outputs.find(output=>output.dataset_id == user_input._id)
+                        : Object.assign({}, user_input, { id: ref.subdir, dataset_id: user_input._id });
                     app_inputs.push(Object.assign({}, dataset, {
                         id: input.id,
-                        task_id: task._id,
+                        task_id: ref.taskId,
                         keys,
                     }));
 
+                    depsByTask[ref.taskId] = depsByTask[ref.taskId] || new Set();
                     if(input.includes) {
                         input.includes.split("\n").forEach(include=>{
-                            subdirs.push("include:"+dataset.id+"/"+include)
+                            depsByTask[ref.taskId].add("include:"+ref.subdir+"/"+include)
                         });
                     } else {
-                        subdirs.push(dataset.id);
+                        depsByTask[ref.taskId].add(ref.subdir);
                     }
                 });
             });
+            const deps_config = Object.keys(depsByTask).map(taskId => ({
+                task: taskId,
+                subdirs: [...depsByTask[taskId]],
+            }));
 
             //similar code alert
             //  ui/modal/newtask
@@ -304,11 +358,27 @@ function runApp(headers, opt) {
                 app_outputs.push(output_req);
             });
 
+            // next sequential tid: normally read off the stage task's own _tid (the
+            // server assigns that when creating the stage task in this instance). With
+            // --direct-deps there's no stage task to read it from, so fetch the
+            // instance's current summary directly instead.
+            let nextTid;
+            if (stageTask) {
+                nextTid = stageTask.config._tid + 1;
+            } else {
+                let instanceRecord = await request({
+                    url: config.api.amaretti + '/instance', headers, json: true,
+                    qs: { find: JSON.stringify({ _id: instance._id }) },
+                });
+                let summary = (instanceRecord.instances[0].config || {}).summary || [];
+                nextTid = summary.length ? Math.max(...summary.map(s=>s.tid)) + 1 : 1;
+            }
+
             // finalize app config object
-            let preparedConfig = prepareConfig(values, task, inputs, datatypeTable, app);
+            let preparedConfig = prepareConfig(values, taskRef, inputs, datatypeTable, app);
             Object.assign(preparedConfig, {
                 _app: app._id,
-                _tid: task.config._tid+1,
+                _tid: nextTid,
                 _inputs: app_inputs,
                 _outputs: app_outputs,
             });
@@ -324,12 +394,13 @@ function runApp(headers, opt) {
                 service: app.github,
                 service_branch: branch,
                 config: preparedConfig,
-                deps_config: [ {
-                    task: task._id,
-                    subdirs,
-                } ],
+                deps_config,
             };
             if (resource) submissionParams.preferred_resource_id = resource;
+            if (opt.dryRun) {
+                console.log(JSON.stringify(submissionParams, null, 2));
+                return resolve({ _id: "DRYRUN", config: submissionParams.config });
+            }
             request.post({ url: config.api.amaretti + "/task", headers, json: true, body: submissionParams }, (err, res, body) => {
                 if (err) return reject(err);
                 else if (res.statusCode != 200) return reject(res.body.message);
@@ -337,11 +408,11 @@ function runApp(headers, opt) {
                             "To monitor the app as it runs, please execute \nbl app wait " + body.task._id);
                 resolve(body.task);
             });
-        });
+        }
     });
 }
 
-function prepareConfig(values, download_task, inputs, datatypeTable, app) {
+function prepareConfig(values, taskRef, inputs, datatypeTable, app) {
     let idToAppInputTable = {};
     //let idToDatatype = {};
     let result = {};
@@ -363,14 +434,16 @@ function prepareConfig(values, download_task, inputs, datatypeTable, app) {
                     let idToFile = {};
                     dtype.files.forEach(file => idToFile[file.id] = file);
                     let inputDtypeFile = idToFile[app.config[key].file_id];
-                    result[key].push("../" + download_task._id + "/" + uInput._id + "/" + (inputDtypeFile.filename||inputDtypeFile.dirname));
+                    let ref = taskRef(uInput);
+                    result[key].push("../" + ref.taskId + "/" + ref.subdir + "/" + (inputDtypeFile.filename||inputDtypeFile.dirname));
                 });
             } else {
                 let dtype = datatypeTable[userInputs[0].datatype];
                 let idToFile = {};
                 dtype.files.forEach(file => idToFile[file.id] = file);
                 let inputDtypeFile = idToFile[app.config[key].file_id];
-                result[key] = "../" + download_task._id + "/" + userInputs[0]._id + "/" + (inputDtypeFile.filename||inputDtypeFile.dirname);
+                let ref = taskRef(userInputs[0]);
+                result[key] = "../" + ref.taskId + "/" + ref.subdir + "/" + (inputDtypeFile.filename||inputDtypeFile.dirname);
             }
         } else {
             result[key] = values[key];
