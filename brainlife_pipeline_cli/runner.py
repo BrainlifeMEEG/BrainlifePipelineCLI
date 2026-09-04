@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -148,8 +149,21 @@ class PipelineRunner:
             req = urllib.request.Request(
                 url, headers={"Authorization": f"Bearer {token}"}
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read())
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+            except (urllib.error.URLError, TimeoutError, ConnectionError,
+                     json.JSONDecodeError) as e:
+                # A transient DNS/network blip here used to crash the whole
+                # (possibly multi-hour) wait outright, discarding a task
+                # that was still genuinely running -- confirmed on the ICM
+                # cluster: a real autoreject run got orphaned by exactly
+                # this mid-wait, socket.gaierror via urlopen, nothing wrong
+                # with the task itself. Log and keep polling instead.
+                print(f"[app_wait] transient error polling {task_id}, "
+                      f"retrying: {e}")
+                time.sleep(poll_interval)
+                continue
             tasks = data.get("tasks", [])
             if tasks:
                 status = tasks[0].get("status")
