@@ -179,3 +179,13 @@ subject/session lists, and the actual step sequence for any one pipeline.
 Those belong in a driver script in the project's own repo (following the
 pattern in `examples/example_driver.py`), imported against this package —
 not added here.
+
+## Authors
+
+- Maximilien Chaumon (https://github.com/dnacombo)
+
+## License
+
+See [license.txt](license.txt). `brainlife_pipeline_cli/` and `examples/` are licensed
+under AGPL-3.0 or later; `vendor/bl_scripts/` retains its original MIT license from the
+upstream brainlife CLI project — see `license.txt` for the exact scope.
